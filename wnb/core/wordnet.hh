@@ -5,6 +5,7 @@
 # include <string>
 # include <cassert>
 # include <vector>
+#include <map>
 //# include <boost/filesystem.hpp>
 
 //Possible https://bugs.launchpad.net/ubuntu/+source/boost/+bug/270873
@@ -82,6 +83,17 @@ namespace wnb
                                   boost::directedS,
                                   synset, ptr> graph; ///< boost graph type
 
+    std::map< pos_t, std::vector<std::pair<std::string,std::string> > > morphologicalrules
+      { {pos_t::N,  { {"s",""}, {"ses","s"}, {"ves","f"}, {"xes","x"}, 
+                  {"zes","z"}, {"ches","ch"}, {"shes","sh"}, 
+                  {"men","man"}, {"ies","y"}  }  },
+        {pos_t::V,  { {"s",""}, {"ies","y"}, {"es","e"}, {"es",""},
+                  {"ed","e"}, {"ed",""}, {"ing","e"}, {"ing",""}   } },
+        {pos_t::A,  { {"er",""}, {"est",""}, {"er","e"}, {"est","e"}  }  },
+        {pos_t::R,    {}  },
+        {pos_t::S,  {}  }
+      };
+
     /// Constructor
     wordnet(const std::string& wordnet_dir, bool verbose=false);
 
@@ -95,14 +107,15 @@ namespace wnb
 
     std::string wordbase(const std::string& word, int ender);
 
-    std::string morphword(const std::string& word, pos_t pos);
+    std::string morphword(const std::string& word, pos_t pos = pos_t::UNKNOWN);
+    std::vector<std::string> _morphword(const std::string &form, pos_t pos);
 
     std::vector<index> index_list;    ///< index list // FIXME: use a map
     graph              wordnet_graph; ///< synsets graph
     info_helper        info;          ///< helper object
     bool               _verbose;
 
-    typedef std::map<std::string,std::string> exc_t;
+    typedef std::map<std::string,std::vector<std::string> > exc_t;
     std::map<pos_t, exc_t> exc;
   };
 

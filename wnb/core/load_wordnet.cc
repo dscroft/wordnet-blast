@@ -235,18 +235,24 @@ namespace wnb
       if (!fin.is_open())
         throw std::runtime_error("File Not Found: " + fn);
 
-      std::map<std::string,std::string>& exc = wn.exc[get_pos_from_name(cat)];
+      std::map<std::string,std::vector<std::string> >& exc = wn.exc[get_pos_from_name(cat)];
 
       std::string row;
 
       std::string key, value;
-      while (std::getline(fin, row))
+      while (std::getline(fin, row))  // modified to read in multiple exceptions where they exist
       {
         std::stringstream srow(row);
         srow >> key;
         srow >> value;
 
-        exc[key] = value;
+        std::map<std::string,std::vector<std::string> >::iterator except = 
+            exc.insert( std::pair<std::string,std::vector<std::string> >(key,{value}) ).first;
+
+        while( srow >> value )
+        {
+          except->second.emplace_back( value );
+        }
       }
     }
 

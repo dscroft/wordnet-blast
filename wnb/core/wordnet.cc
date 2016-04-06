@@ -102,54 +102,93 @@ namespace wnb
   std::string
   wordnet::morphword(const std::string& word, pos_t pos)
   {
-    // first look for word on exception list
-    exc_t::iterator it = exc[pos].find(word);
-    if (it != exc[pos].end())
-      return it->second; // found in exception list
+    std::vector<std::string> results;
 
-    std::string tmpbuf;
-    std::string end;
-    int cnt = 0;
-
-    if (pos == R)
-      return ""; // Only use exception list for adverbs
-
-    if (pos == N)
+    auto it = morphologicalrules.find( pos );
+    if( it != morphologicalrules.end() )
     {
-      if (ext::ends_with(word, "ful"))
-      {
-        cnt = word.size() - 3;
-        tmpbuf = word.substr(0, cnt);
-        end = "ful";
-      }
-      else
-      {
-        // check for noun ending with 'ss' or short words
-        if (ext::ends_with(word, "ss") || word.size() <= 2)
-          return "";
-      }
+      results = _morphword( word, pos );
+    }
+    else
+    {
+      for( auto &pos : morphologicalrules )
+        if( pos.first != pos_t::S )     // revisit, probably filter if
+        {
+          std::vector<std::string> temp = _morphword( word, pos.first ); // gotta be a better way than this
+          results.insert( results.end(), temp.begin(), temp.end() );
+        }
     }
 
-    // If not in exception list, try applying rules from tables
+    if( results.empty() ) return "";
 
-    if (tmpbuf.size() == 0)
-      tmpbuf = word;
+    //cout << "results: ";
+    //for( auto r : results ) cout << r << ", "; cout << endl;
 
-    if (pos != pos_t::UNKNOWN) 
-    {
-      int offset  = info.offsets[pos];
-      int pos_cnt = info.cnts[pos];
-
-      std::string morphed;
-      for  (int i = 0; i < pos_cnt; i++)
-      {
-        morphed = wordbase(tmpbuf, (i + offset));
-        if (morphed != tmpbuf && is_defined(morphed, pos))
-           return morphed + end;
-      }
-      return morphed;
-    }
-    return word;
+    return *(results.begin());
   }
+
+  std::vector<std::string> 
+  wordnet::_morphword(const std::string &form, pos_t pos)
+  {
+    std::vector<std::pair<std::string,std::string> > &morphsubs = morphologicalrules[pos];
+    std::vector<std::string> results;
+
+    auto copyfilter = [this,pos]( const std::string &s ) 
+          { 
+            auto indexes = this->get_indexes( s );
+            for( auto it=indexes.first; it!=indexes.second; ++it )
+              if( it->pos == pos )
+                return true;
+
+            return false;
+          };
+
+    // check the exceptions list
+    std::map<std::string,std::vector<std::string> > &exceptions = exc[pos];
+    std::map<std::string,std::vector<std::string> >::iterator except = exceptions.find( form  );
+    if( except != exceptions.end() )
+    {
+      results.resize( except->second.size() );
+      results.erase( copy_if( except->second.begin(), except->second.end(), results.begin(), copyfilter ), results.end() );
+
+      return results;
+    }
+
+    // apply the modify rules
+    std::vector<std::string> forms { form }, rules;
+    do
+    {
+      rules.clear();
+      for( std::string &f : forms )
+      {
+        for( std::pair<std::string,std::string> &sub : morphsubs )
+        {
+          if( f.length() > sub.first.length() &&
+            !f.compare( f.length() - sub.first.length(), sub.first.length(), sub.first ) )
+          {
+            rules.emplace_back( f.substr( 0, f.length() - sub.first.length() ) + sub.second );
+          }
+        }
+      }
+
+      // filter
+      results.clear();
+      copy_if( forms.begin(), forms.end(), back_inserter(results), copyfilter );
+      copy_if( rules.begin(), rules.end(), back_inserter(results), copyfilter );
+
+      if( !results.empty() )
+      {
+        return results;
+      }
+
+      forms = rules;
+    }
+    while( !forms.empty() );
+
+    // can't find anything
+    return {};
+  }
+
+  
 
 } // end of namespace wnb
