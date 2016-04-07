@@ -181,7 +181,8 @@ namespace wnb
         return results;
       }
 
-      forms = rules;
+      //forms = rules;
+      forms.swap( rules );
     }
     while( !forms.empty() );
 
