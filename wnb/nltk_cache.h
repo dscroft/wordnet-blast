@@ -4,7 +4,6 @@
 #include <atomic>
 #include <algorithm>
 #include "tbb/parallel_for_each.h"
-#include "offsetstores.h"
 #include <vector>
 #include <string>
 #include <mutex>
@@ -24,7 +23,8 @@ public:
 	//wnb::nltk_similarity nltkSim;
 
 	const std::string similaritiesFilename = "similarities";
-	offset::OffsetMatrix<uint8_t> wnSimilarities;
+	static const uint8_t nullsim = 255;
+	//offset::OffsetMatrix<uint8_t> wnSimilarities;
 
 //		uint8_t u = f1 < 0.f ? 255 : (f1*254.0f)+0.5f;
 //		float f2 = u == 255 ? -1.f : (1.f / 254.f) * u;
@@ -37,7 +37,7 @@ public:
 
 	static float b_to_f( uint8_t b )
 	{
-		return b == 255 ? -1.f : pow( b, -1.f );
+		return b == nullsim ? -1.f : pow( b, -1.f );
 		//return (1.f / 255.f) * b;
 	}
 
@@ -50,16 +50,16 @@ public:
 
 	void set_similarity( int a, int b, float sim )
 	{
-		wnSimilarities.set( a, b, f_to_b(sim) );
+		//wnSimilarities.set( a, b, f_to_b(sim) );
 	}
 
 public:
-	bool empty() const { return wnSimilarities.empty(); }
-	size_t count( const uint8_t val ) const { return wnSimilarities.count(val); }
+	bool empty() const { /*return wnSimilarities.empty();*/ }
+	size_t count( const uint8_t val ) const { /*return wnSimilarities.count(val);*/ }
 
 	struct Row
 	{
-		size_t offset, from, size;
+		size_t offset, from, to;
 	};
 	vector<Row> matrix;
 	vector<uint8_t> values;
@@ -73,93 +73,79 @@ public:
 		for( auto it=vs.first; it!=vs.second; ++it )
 			synsets.emplace_back( wn.wordnet_graph[*it] );
 
-		//synsets.resize(10); // DEBUG
+		synsets.resize(2000); // DEBUG
 
 		wnb::nltk_similarity nltkSim( wn );
 
-		if( verbose ) std::cout << "Generate ";
+		if( verbose ) std::cout << "Generate " << endl;
 
-		struct TempRow
-		{	
-			std::vector<uint8_t> data;
-			size_t from;
+		const size_t fullMatrixSize = (pow(synsets.size(),2)+synsets.size())/2;
+		
+		matrix.resize( synsets.size() );
+		values.resize( fullMatrixSize );
+
+		auto pos = [&synsets]( const size_t a, const size_t b )
+		{
+			return ((a*synsets.size())+b) - (((a*a)+a)/2);
 		};
 
-		std::vector<TempRow> tempmatrix( synsets.size() );
-
 		atomic<size_t> progress(0);
-
 		auto genfunc = [&]( const tbb::blocked_range<size_t> &range )
 		{
-			std::vector<float> buffer;
-
-			for( size_t i=range.begin(); i<range.end(); ++i )
+			for( size_t _a=range.begin(); _a<range.end(); ++_a )
 			{
-				size_t sims = 0;
+				const wnb::synset &a = *(synsets.begin()+_a);
+				const size_t n = synsets.size();
 
-				const wnb::synset &a = *(synsets.begin()+i);
-				TempRow &row = tempmatrix[a.id];
-
-				buffer.resize( synsets.size()-a.id );
-				for( auto b=synsets.begin()+a.id; b!=synsets.end(); ++b )
+				for( size_t _b=_a; _b<synsets.size(); ++_b )
 				{
-					*(buffer.begin()+(b->id-a.id)) = nltk_cache::f_to_b(nltkSim(a,*b)); //nltkSim( a, *b );
+					const wnb::synset &b = *(synsets.begin()+_b);
 
-					/*if( *(buffer.begin()+(b->id-a.id)) > 0.32 && *(buffer.begin()+(b->id-a.id)) < 0.34 )
-						*(buffer.begin()+(b->id-a.id)) = -1;*/
+					const size_t _v = pos(_a,_b);
+					auto v = values.begin() + _v;
 
-					++sims;
+					*v = nltk_cache::f_to_b( nltkSim(a,b) );
+					//if( *v>0.32 && *v<0.34 ) *v = -1.f;
 				}
 
-				auto begin = buffer.begin()+1;
-				while( begin!=buffer.end() && *begin==-1 ) ++begin;
+				/* === find area of iterest in sim values (i.e. !=-1) ====== */
+				const auto _begin = values.begin() + pos(_a,_a);
+				auto begin=_begin;
+				auto end = values.begin() + pos(_a,synsets.size());
 
-				auto end = buffer.end()-1;
-				while( end>begin && *end==-1 ) --end;
+				begin++; // ignore a=b comparision, always 1.0
+				while( begin!=end && *begin==nullsim ) ++begin;
+
+				--end; // neg then add 1 to avoid having to neg 1 in each loop iteraton;
+				while( end>begin && *end==nullsim  ) --end;
 				++end;
+				/* === end ====== */
 
-				row.data = vector<uint8_t>( begin, end );
-				row.from = begin - buffer.begin() + a.id;
+				matrix[_a] = { 0, _a+(begin-_begin), _a+(end-_begin) };
 
-				progress += sims;
-				cout << progress << "          \r" << flush;
+				cout << ++progress << "     \r" << flush;
 			}
 		};
 		tbb::parallel_for( tbb::blocked_range<size_t>( 0, synsets.size() ), genfunc );
-		//tbb::parallel_for_each( synsets.begin(), synsets.end(), genfunc );
-	//	for_each( synsets.begin(), synsets.end(), func );
+		//genfunc( tbb::blocked_range<size_t>( 0, synsets.size() ) );
+		cout << endl;
 
-
-		cout << "calc offsets" << endl;
-
-		matrix.resize( synsets.size() );
-		if( !synsets.empty() ) matrix.front() = { 0, tempmatrix.front().from, tempmatrix.front().data.size() };
-
-		for( size_t i=1; i<synsets.size(); ++i )
+		// === move all areas of interest to form a single contiguos block ======
+		auto runningOffset = values.begin();
+		for( size_t _a=0; _a<synsets.size(); ++_a )
 		{
-			matrix[i] = { matrix[i-1].offset+matrix[i-1].size, tempmatrix[i].from, tempmatrix[i].data.size() };
+			auto &r = matrix[_a];
+			const auto begin = values.begin()+pos(_a,r.from);
+			const auto end = values.begin()+pos(_a,r.to);
+
+			r.offset = runningOffset - values.begin();
+
+			move( begin, end, runningOffset );
+			runningOffset += end - begin;
 		}
-
-		cout << "create final matrix" << endl;
-
-		const auto &b = matrix.back();
-		values.resize( b.offset + b.size );
-
-		auto copyfunc = [&]( const tbb::blocked_range<size_t> &range )
-		{
-			for( size_t i=range.begin(); i<range.end(); ++i )
-			{
-				const auto &temprow = tempmatrix[i];
-				const auto &row = matrix[i];
-
-				std::copy( temprow.data.begin(), temprow.data.end(), values.begin()+row.offset );
-			}		
-		};
-		tbb::parallel_for( tbb::blocked_range<size_t>( 0, synsets.size() ), copyfunc );
-		
-		//std::cout << "matrix: " << tempmatrix.size() << std::endl;	
-
-		//for( auto i : values ) cout << nltk_cache::b_to_f_cached( i ) << ", "; cout << endl;
+		values.erase( runningOffset, values.end() );
+		values.shrink_to_fit();
+		// === end ======
 
 		if( verbose ) std::cout << std::endl;
 	}
@@ -212,15 +198,16 @@ public:
 				std::cout << ++progress << "\r" << std::flush;
 			}
 
-			const size_t from = row.from;
 			const size_t offset = row.offset;
-			const size_t size = row.size;
-			file.write( (char*)&from, sizeof(from) );
+			const size_t from = row.from;
+			const size_t to = row.to;
+			
 			file.write( (char*)&offset, sizeof(offset) );
-			file.write( (char*)&size, sizeof(size) );
-
-			file.write( (char*)values.data(), sizeof(uint8_t)*total );
+			file.write( (char*)&from, sizeof(from) );
+			file.write( (char*)&to, sizeof(to) );
 		}
+
+		file.write( (char*)values.data(), sizeof(uint8_t)*values.size() );
 
 		if( verbose ) std::cout << std::endl;
 
@@ -275,14 +262,14 @@ public:
 
 	float operator()( const wnb::synset& a, const wnb::synset& b ) const
 	{
-		if( empty() ) return -1.f;
+		/*if( empty() ) return -1.f;
 
 		if( a == b ) return 1.f;
 
-		return b_to_f_cached( wnSimilarities.get( std::min(a.id,b.id), std::max(a.id,b.id) ) );
+		return b_to_f_cached( wnSimilarities.get( std::min(a.id,b.id), std::max(a.id,b.id) ) );*/
 	}
 
-	nltk_cache() : wnSimilarities( f_to_b(-1.f) )
+	nltk_cache() /*: wnSimilarities( f_to_b(-1.f) )*/
 	{
 		for( int i=0; i<256; ++i )
 		{
@@ -292,7 +279,7 @@ public:
 
 	nltk_cache( const std::string& path, const bool verbose=false ) : nltk_cache()
 	{
-		wnSimilarities.load( path + similaritiesFilename, verbose );
+		//wnSimilarities.load( path + similaritiesFilename, verbose );
 	}
 
 	nltk_cache( wnb::wordnet& wn, const bool verbose=false ) : nltk_cache()
