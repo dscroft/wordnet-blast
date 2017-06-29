@@ -43,7 +43,7 @@ public:
 
 	float f_lookup[256];
 
-	float b_to_f_cached( uint8_t b ) const
+	inline float b_to_f_cached( uint8_t b ) const
 	{
 		return f_lookup[b];
 	}
@@ -54,7 +54,7 @@ public:
 	}
 
 public:
-	bool empty() const { /*return wnSimilarities.empty();*/ }
+	bool empty() const { return matrix.empty(); }
 	size_t count( const uint8_t val ) const { /*return wnSimilarities.count(val);*/ }
 
 	struct Row
@@ -63,6 +63,12 @@ public:
 	};
 	vector<Row> matrix;
 	vector<uint8_t> values;
+
+	void clear()
+	{
+		matrix = vector<Row>();
+		values = vector<uint8_t>();
+	}
 
 	void calculate_matrix( wnb::wordnet& wn, const bool verbose=false )
 	{
@@ -73,7 +79,7 @@ public:
 		for( auto it=vs.first; it!=vs.second; ++it )
 			synsets.emplace_back( wn.wordnet_graph[*it] );
 
-		synsets.resize(2000); // DEBUG
+		//synsets.resize(DBG_SYN); // DEBUG
 
 		wnb::nltk_similarity nltkSim( wn );
 
@@ -123,7 +129,8 @@ public:
 
 				matrix[_a] = { 0, _a+(begin-_begin), _a+(end-_begin) };
 
-				cout << ++progress << "     \r" << flush;
+				++progress;
+				if( progress % 100 == 0 ) cout << ++progress << "     \r" << flush;
 			}
 		};
 		tbb::parallel_for( tbb::blocked_range<size_t>( 0, synsets.size() ), genfunc );
@@ -144,7 +151,9 @@ public:
 			runningOffset += end - begin;
 		}
 		values.erase( runningOffset, values.end() );
+		cout << "pre shrink" << endl << flush;
 		values.shrink_to_fit();
+		cout << "post shrink" << endl << flush;
 		// === end ======
 
 		if( verbose ) std::cout << std::endl;
@@ -175,7 +184,7 @@ public:
 			 typedef T                typedef T                   typedef T	
 	*/
 
-	bool save( const std::string& path, const bool verbose=true ) const
+	bool save( const std::string &path, const bool verbose=true ) const
 	{
 		if( verbose) std::cout << "Save file" << std::endl;
 
@@ -198,27 +207,62 @@ public:
 				std::cout << ++progress << "\r" << std::flush;
 			}
 
-			const size_t offset = row.offset;
-			const size_t from = row.from;
-			const size_t to = row.to;
-			
-			file.write( (char*)&offset, sizeof(offset) );
-			file.write( (char*)&from, sizeof(from) );
-			file.write( (char*)&to, sizeof(to) );
+			file.write( (char*)&row.offset, sizeof(row.offset) );
+			file.write( (char*)&row.from, sizeof(row.from) );
+			file.write( (char*)&row.to, sizeof(row.to) );
 		}
 
 		file.write( (char*)values.data(), sizeof(uint8_t)*values.size() );
+		file.close();
 
 		if( verbose ) std::cout << std::endl;
-
-		file.close();
 		
 		return false;
-
-
-		//return wnSimilarities.save( path + similaritiesFilename );
 	}
 
+	bool load( const std::string &path, const bool verbose=true )
+	{
+		std::ifstream file( path+similaritiesFilename, std::ios::binary );
+		if( !file.good() ) return true;
+
+		clear(); // make sure the matrix is empty first
+		
+		// read the minimum row number and the number of rows
+		size_t rowsNum;
+		file.read( (char*)&rowsNum, sizeof(rowsNum) );
+
+		matrix.resize( rowsNum );
+		
+		for( auto &row : matrix )
+		{
+			file.read( (char*)&row.offset, sizeof(row.offset) );
+			file.read( (char*)&row.from, sizeof(row.from) );
+			file.read( (char*)&row.to, sizeof(row.to) );
+		}
+
+		const size_t total  = matrix.back().offset + matrix.back().to - matrix.back().from;
+		values.resize( total );
+
+		file.read( (char*)values.data(), sizeof(uint8_t)*total );
+		
+		/*if( verbose )
+		{
+	#if defined(BOOST)
+			boost::progress_display show_progress( total, output );
+	#else
+			size_t show_progress = 0;
+	#endif
+			for( Row &r : *this )
+				show_progress += read_row( r, defaultValue );
+		}
+		else
+			for( Row &r : *this )
+				read_row( r, defaultValue );*/
+
+		file.close();
+
+		return false;
+	}
 
 	/* get the similarity between two synsets as a byte*/
 	/*uint8_t similarity_b( const wnb::synset &a, const wnb::synset &b )
@@ -236,53 +280,56 @@ public:
 		return b_to_f(wnSimilarities.get( min(a.id,b.id), max(a.id,b.id) ));
 	}*/
 
-	static std::vector<std::string> split( const std::string &text, char delimiter='|' )
-	{
-		std::vector<std::string> tokens;
-
-	    size_t s, e;
-	    for( s=0, e=text.find(delimiter);
-			e!=std::string::npos;
-			s=e+1, e=text.find(delimiter,s) )
-		{
-			tokens.emplace_back( text.substr( s, e-s) );
-		}
-
-		e = text.length()-s;
-		if( e )
-			tokens.emplace_back( text.substr( s, e ) );
-
-		for( auto &tok : tokens )
-			std::transform( std::begin(tok), std::end(tok), std::begin(tok), ::tolower );
-
-		return tokens;
-	}
-
 	typedef std::vector< wnb::synset > Synsets;
 
-	float operator()( const wnb::synset& a, const wnb::synset& b ) const
+	inline float fast_lookup( const wnb::synset &a, const wnb::synset &b ) const
 	{
-		/*if( empty() ) return -1.f;
+		//cout << "fast_lookup(" << a.id << ", " << b.id << ")" << endl;
+		if( a.id < b.id )
+		{
+			//cout << "  a.id < b.id" << endl;
+			const auto &row = matrix[a.id];
+			if( b.id < row.from || b.id >= row.to ) { /*cout << "  null" << endl;*/ return -1.f; }
 
-		if( a == b ) return 1.f;
+			/*cout << "  row.offset = " << row.offset << endl;
+			cout << "  row.from   = " << row.from << endl;
+			cout << "  row.to     = " << row.to << endl;*/
 
-		return b_to_f_cached( wnSimilarities.get( std::min(a.id,b.id), std::max(a.id,b.id) ) );*/
+			const size_t pos = row.offset + b.id - row.from;
+			return b_to_f_cached( values[pos] );
+		}
+		else if( a.id > b.id )
+		{
+			//cout << "  a.id > b.id" << endl;
+			const auto &row = matrix[b.id];
+			if( a.id < row.from || a.id >= row.to ) return -1.f;
+
+			const size_t pos = row.offset + a.id - row.from;
+			return b_to_f_cached( values[pos] );
+		}
+
+		return 1.f;
+	}
+
+	float operator()( const wnb::synset &a, const wnb::synset &b ) const
+	{
+		if( empty() ) return b_to_f_cached(nullsim);
+
+		return fast_lookup( a, b );
 	}
 
 	nltk_cache() /*: wnSimilarities( f_to_b(-1.f) )*/
 	{
 		for( int i=0; i<256; ++i )
-		{
-			f_lookup[i] = b_to_f( i );
-		}
+			f_lookup[i] = b_to_f( (uint8_t)i );
 	}
 
-	nltk_cache( const std::string& path, const bool verbose=false ) : nltk_cache()
+	nltk_cache( const std::string &path, const bool verbose=false ) : nltk_cache()
 	{
-		//wnSimilarities.load( path + similaritiesFilename, verbose );
+		load( path, verbose );
 	}
 
-	nltk_cache( wnb::wordnet& wn, const bool verbose=false ) : nltk_cache()
+	nltk_cache( wnb::wordnet &wn, const bool verbose=false ) : nltk_cache()
 	{
 		calculate_matrix( wn, verbose );
 	}
