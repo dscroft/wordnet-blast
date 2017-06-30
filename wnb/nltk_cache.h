@@ -2,43 +2,31 @@
 #define NLTK_CACHE_H
 
 #include <atomic>
-#include <algorithm>
-#include "tbb/parallel_for_each.h"
 #include <vector>
-#include <string>
-#include <mutex>
 #include <iterator>
-#include <iomanip>
-#include <thread>
+#include <fstream>
 
 #include "wnb/core/wordnet.hh"
 #include "wnb/nltk_similarity.hh"
 
-using namespace std;
+#include "tbb/parallel_for_each.h"
+
+#include <boost/progress.hpp>
 
 class nltk_cache
 {
 public:
-	//wnb::wordnet &wn;
-	//wnb::nltk_similarity nltkSim;
-
 	const std::string similaritiesFilename = "similarities";
 	static const uint8_t nullsim = 255;
-	//offset::OffsetMatrix<uint8_t> wnSimilarities;
-
-//		uint8_t u = f1 < 0.f ? 255 : (f1*254.0f)+0.5f;
-//		float f2 = u == 255 ? -1.f : (1.f / 254.f) * u;
 
 	static uint8_t f_to_b( float f )
 	{
 		return round( pow( f, -1.f ) );
-		//return f == -1 ? 0 : uint8_t((f*255.f)+0.5f);
 	}
 
 	static float b_to_f( uint8_t b )
 	{
 		return b == nullsim ? -1.f : pow( b, -1.f );
-		//return (1.f / 255.f) * b;
 	}
 
 	float f_lookup[256];
@@ -55,50 +43,48 @@ public:
 
 public:
 	bool empty() const { return matrix.empty(); }
-	size_t count( const uint8_t val ) const { /*return wnSimilarities.count(val);*/ }
+	//size_t count( const uint8_t val ) const { /*return wnSimilarities.count(val);*/ }
 
 	struct Row
 	{
 		size_t offset, from, to;
 	};
-	vector<Row> matrix;
-	vector<uint8_t> values;
+	std::vector<Row> matrix;
+	std::vector<uint8_t> values;
 
 	void clear()
 	{
-		matrix = vector<Row>();
-		values = vector<uint8_t>();
+		matrix = std::vector<Row>();
+		values = std::vector<uint8_t>();
 	}
 
 	void calculate_matrix( wnb::wordnet& wn, const bool verbose=false )
 	{
-		std::pair<boost::adjacency_list<>::vertex_iterator,
-			boost::adjacency_list<>::vertex_iterator> vs = boost::vertices(wn.wordnet_graph);
-
-		std::vector<wnb::synset> synsets;	// should really figure out how to do this without copying all to a vector first
-		for( auto it=vs.first; it!=vs.second; ++it )
-			synsets.emplace_back( wn.wordnet_graph[*it] );
-
-		//synsets.resize(DBG_SYN); // DEBUG
-
+		auto synsets = wn.get_synsets();
 		wnb::nltk_similarity nltkSim( wn );
 
-		if( verbose ) std::cout << "Generate " << endl;
+		std::unique_ptr<boost::progress_display> showProgress;
+		std::mutex lockProgress;
+		if( verbose )
+		{
+			std::cout << std::endl << "### Generating similarity cache";
+			showProgress = std::make_unique<boost::progress_display>( synsets.size() );
+		}
 
 		const size_t fullMatrixSize = (pow(synsets.size(),2)+synsets.size())/2;
-		
 		matrix.resize( synsets.size() );
 		values.resize( fullMatrixSize );
 
+		/* calculate the storage position for synset pair given synset ids */
 		auto pos = [&synsets]( const size_t a, const size_t b )
 		{
 			return ((a*synsets.size())+b) - (((a*a)+a)/2);
 		};
 
-		atomic<size_t> progress(0);
+		/* generate all similarity values in given range */
 		auto genfunc = [&]( const tbb::blocked_range<size_t> &range )
 		{
-			for( size_t _a=range.begin(); _a<range.end(); ++_a )
+			for( size_t _a=range.begin(); _a!=range.end(); ++_a )
 			{
 				const wnb::synset &a = *(synsets.begin()+_a);
 				const size_t n = synsets.size();
@@ -111,7 +97,6 @@ public:
 					auto v = values.begin() + _v;
 
 					*v = nltk_cache::f_to_b( nltkSim(a,b) );
-					//if( *v>0.32 && *v<0.34 ) *v = -1.f;
 				}
 
 				/* === find area of iterest in sim values (i.e. !=-1) ====== */
@@ -128,14 +113,18 @@ public:
 				/* === end ====== */
 
 				matrix[_a] = { 0, _a+(begin-_begin), _a+(end-_begin) };
+			}
 
-				++progress;
-				if( progress % 100 == 0 ) cout << ++progress << "     \r" << flush;
+			if( verbose )
+			{
+				std::lock_guard<std::mutex> lock( lockProgress );
+				*showProgress += range.end() - range.begin();
 			}
 		};
 		tbb::parallel_for( tbb::blocked_range<size_t>( 0, synsets.size() ), genfunc );
-		//genfunc( tbb::blocked_range<size_t>( 0, synsets.size() ) );
-		cout << endl;
+		//genfunc( tbb::blocked_range<size_t>( 0, synsets.size() ) ); // single thread test
+
+		if( verbose ) std::cout << std::endl << "calculated: " << values.size() << std::endl;
 
 		// === move all areas of interest to form a single contiguos block ======
 		auto runningOffset = values.begin();
@@ -151,37 +140,33 @@ public:
 			runningOffset += end - begin;
 		}
 		values.erase( runningOffset, values.end() );
-		cout << "pre shrink" << endl << flush;
 		values.shrink_to_fit();
-		cout << "post shrink" << endl << flush;
 		// === end ======
 
-		if( verbose ) std::cout << std::endl;
+		if( verbose ) std::cout << "kept: " << values.size() << std::endl;
 	}
 
-	/* writes the currect Matrix as a binary file to filename.
+	/* writes the currect cache as a binary file to filename.
 		returns true if error, false if success.
 
 		format is:
-			[minimum row number]           [number of rows]
-			 size_t                         size_t
+			[number of rows = n] size_t         
 
-			[minimum col number in 1st row][number of columns in 1st row]
-			 size_t                         size_t
-			[1st row, 1st col value][1st row, 2nd col value]...[1st row, last col value]
-			 typedef T               typedef T                  typedef T
+			[offset into cache where row 0 data can be found] size_t
+			[minimum column in row 0 that is actually stored] size_t
+			[maximum column in row 0 that is actually stored] size_t
 
-			[minimum col number in 2nd row][number of columns in 2nd row]
-			 size_t                         size_t
-			[2nd row, 1st col value][2nd row, 2nd col value]...[2nd row, last col value]
-			 typedef T               typedef T                  typedef T
+			[offset into cache where row 1 data can be found] size_t
+			[minimum column in row 1 that is actually stored] size_t
+			[maximum column in row 1 that is actually stored] size_t
 
 			...
 
-			[minimum col number in last row][number of columns in last row]
-			 size_t                         size_t
-			[last row, 1st col value][last row, 2nd col value]...[last row, last col value]
-			 typedef T                typedef T                   typedef T	
+			[offset into cache where row n-1 data can be found] size_t
+			[minimum column in row n-1 that is actually stored] size_t
+			[maximum column in row n-1 that is actually stored] size_t
+
+			[contiguous block of v similarity values] uint8_t * v
 	*/
 
 	bool save( const std::string &path, const bool verbose=true ) const
@@ -194,25 +179,21 @@ public:
 		// write the minimum row number and the number of rows
 		const size_t total = values.size();
 		const size_t rowsNum = matrix.size();
-		//file.write( (char*)&total, sizeof(total) );
 		file.write( (char*)&rowsNum, sizeof(rowsNum) );
 
 		size_t progress = 0;
 
-		// for each row in order
 		for( const auto &row : matrix )
 		{
 			if( verbose )
-			{
 				std::cout << ++progress << "\r" << std::flush;
-			}
-
+			
 			file.write( (char*)&row.offset, sizeof(row.offset) );
 			file.write( (char*)&row.from, sizeof(row.from) );
 			file.write( (char*)&row.to, sizeof(row.to) );
 		}
 
-		file.write( (char*)values.data(), sizeof(uint8_t)*values.size() );
+		file.write( (char*)values.data(), sizeof(decltype(values)::value_type)*values.size() );
 		file.close();
 
 		if( verbose ) std::cout << std::endl;
@@ -225,8 +206,17 @@ public:
 		std::ifstream file( path+similaritiesFilename, std::ios::binary );
 		if( !file.good() ) return true;
 
+		std::unique_ptr<boost::progress_display> showProgress;
+		if( verbose )
+		{
+			std::cout << std::endl << "### Loading similarity cache";
+			showProgress = std::make_unique<boost::progress_display>( 100 );
+		}
+
 		clear(); // make sure the matrix is empty first
 		
+		if( verbose ) *showProgress += 1;
+
 		// read the minimum row number and the number of rows
 		size_t rowsNum;
 		file.read( (char*)&rowsNum, sizeof(rowsNum) );
@@ -240,24 +230,21 @@ public:
 			file.read( (char*)&row.to, sizeof(row.to) );
 		}
 
+		if( verbose ) *showProgress += 1;
+
 		const size_t total  = matrix.back().offset + matrix.back().to - matrix.back().from;
 		values.resize( total );
 
-		file.read( (char*)values.data(), sizeof(uint8_t)*total );
-		
-		/*if( verbose )
+		if( verbose ) *showProgress += 1;
+
+		file.read( (char*)values.data(), sizeof(decltype(values)::value_type)*total );
+
+		if( verbose )
 		{
-	#if defined(BOOST)
-			boost::progress_display show_progress( total, output );
-	#else
-			size_t show_progress = 0;
-	#endif
-			for( Row &r : *this )
-				show_progress += read_row( r, defaultValue );
+			*showProgress += 97;
+			std::cout << "cache_vals: " << values.size() << std::endl;
+			showProgress.release();
 		}
-		else
-			for( Row &r : *this )
-				read_row( r, defaultValue );*/
 
 		file.close();
 
@@ -280,27 +267,19 @@ public:
 		return b_to_f(wnSimilarities.get( min(a.id,b.id), max(a.id,b.id) ));
 	}*/
 
-	typedef std::vector< wnb::synset > Synsets;
-
 	inline float fast_lookup( const wnb::synset &a, const wnb::synset &b ) const
 	{
-		//cout << "fast_lookup(" << a.id << ", " << b.id << ")" << endl;
+		// better performance unrolled than when using min/max
 		if( a.id < b.id )
 		{
-			//cout << "  a.id < b.id" << endl;
 			const auto &row = matrix[a.id];
-			if( b.id < row.from || b.id >= row.to ) { /*cout << "  null" << endl;*/ return -1.f; }
-
-			/*cout << "  row.offset = " << row.offset << endl;
-			cout << "  row.from   = " << row.from << endl;
-			cout << "  row.to     = " << row.to << endl;*/
+			if( b.id < row.from || b.id >= row.to ) return -1.f;
 
 			const size_t pos = row.offset + b.id - row.from;
 			return b_to_f_cached( values[pos] );
 		}
 		else if( a.id > b.id )
 		{
-			//cout << "  a.id > b.id" << endl;
 			const auto &row = matrix[b.id];
 			if( a.id < row.from || a.id >= row.to ) return -1.f;
 
@@ -313,12 +292,12 @@ public:
 
 	float operator()( const wnb::synset &a, const wnb::synset &b ) const
 	{
-		if( empty() ) return b_to_f_cached(nullsim);
+		if( empty() || std::max(a.id,b.id) >= matrix.size() ) return b_to_f_cached(nullsim);
 
 		return fast_lookup( a, b );
 	}
 
-	nltk_cache() /*: wnSimilarities( f_to_b(-1.f) )*/
+	nltk_cache()
 	{
 		for( int i=0; i<256; ++i )
 			f_lookup[i] = b_to_f( (uint8_t)i );
