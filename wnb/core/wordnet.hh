@@ -99,6 +99,8 @@ namespace wnb
 
     /// Return synsets matching word
     std::vector<synset> get_synsets(const std::string& word, pos_t pos = pos_t::UNKNOWN);
+
+    std::vector<synset> get_synsets() const;
     //FIXME: todo
     std::vector<synset> get_synset(const std::string& word, char pos, int i);
 

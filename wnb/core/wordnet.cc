@@ -63,6 +63,19 @@ namespace wnb
     return synsets;
   }
 
+  std::vector<synset> 
+  wordnet::get_synsets() const
+  {
+    std::pair<boost::adjacency_list<>::vertex_iterator,
+    boost::adjacency_list<>::vertex_iterator> vs = boost::vertices(wordnet_graph);
+
+    std::vector<wnb::synset> synsets; 
+    for( auto it=vs.first; it!=vs.second; ++it )
+      synsets.emplace_back( wordnet_graph[*it] );
+
+    return synsets;
+  }
+
   std::pair<std::vector<index>::iterator, std::vector<index>::iterator>
   wordnet::get_indexes(const std::string& word)
   {
